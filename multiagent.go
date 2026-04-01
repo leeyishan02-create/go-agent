@@ -61,22 +61,22 @@ func MultiAgentQueryWithHistory(client *Client, toolList []Tool, history []Messa
 
 			toolDefs := buildToolDefs(toolList)
 
-			cb(Event{Type: EventThinking, Content: fmt.Sprintf("[%s] starting...", r.Name), AgentID: r.Name, AgentStatus: "thinking"})
+			cb(Event{Type: EventThinking, Content: "starting...", AgentID: r.Name, AgentStatus: "thinking"})
 
 			content, _, usage, err := client.ChatStream(messages, toolDefs, nil, nil)
 			if err != nil {
-				cb(Event{Type: EventThinking, Content: fmt.Sprintf("[%s] error: %v", r.Name, err), AgentID: r.Name, AgentStatus: "error"})
+				cb(Event{Type: EventThinking, Content: "error: " + err.Error(), AgentID: r.Name, AgentStatus: "error"})
 				results[idx] = AgentResult{Role: r.Name, Error: err}
 				return
 			}
 
 			if strings.TrimSpace(content) == "" {
-				cb(Event{Type: EventThinking, Content: fmt.Sprintf("[%s] empty response", r.Name), AgentID: r.Name, AgentStatus: "error"})
+				cb(Event{Type: EventThinking, Content: "empty response", AgentID: r.Name, AgentStatus: "error"})
 				results[idx] = AgentResult{Role: r.Name, Error: fmt.Errorf("empty response")}
 				return
 			}
 
-			cb(Event{Type: EventThinking, Content: fmt.Sprintf("[%s] done", r.Name), AgentID: r.Name, AgentStatus: "done"})
+			cb(Event{Type: EventThinking, Content: "done", AgentID: r.Name, AgentStatus: "done"})
 
 			usageMu.Lock()
 			totalUsage.PromptTokens += usage.PromptTokens
@@ -134,7 +134,7 @@ func MultiAgentQueryWithHistory(client *Client, toolList []Tool, history []Messa
 		go func(idx int, r AgentResult) {
 			defer debateWg.Done()
 
-			cb(Event{Type: EventThinking, Content: fmt.Sprintf("[%s] debating...", r.Role), AgentID: r.Role, AgentStatus: "debating"})
+			cb(Event{Type: EventThinking, Content: "debating...", AgentID: r.Role, AgentStatus: "debating"})
 
 			var critiquePrompt strings.Builder
 			critiquePrompt.WriteString(fmt.Sprintf("You are %s. Here was your original answer:\n\n%s\n\n", r.Role, r.Content))
@@ -154,7 +154,7 @@ func MultiAgentQueryWithHistory(client *Client, toolList []Tool, history []Messa
 			content, _, usage, err := client.Chat(debateMessages, nil)
 			if err != nil || strings.TrimSpace(content) == "" {
 				debateResults[idx] = r.Content
-				cb(Event{Type: EventThinking, Content: fmt.Sprintf("[%s] debate done (fallback)", r.Role), AgentID: r.Role, AgentStatus: "done"})
+				cb(Event{Type: EventThinking, Content: "debate done (fallback)", AgentID: r.Role, AgentStatus: "done"})
 				return
 			}
 
@@ -165,14 +165,14 @@ func MultiAgentQueryWithHistory(client *Client, toolList []Tool, history []Messa
 			usageMu.Unlock()
 
 			debateResults[idx] = content
-			cb(Event{Type: EventThinking, Content: fmt.Sprintf("[%s] debate done", r.Role), AgentID: r.Role, AgentStatus: "done"})
+			cb(Event{Type: EventThinking, Content: "debate done", AgentID: r.Role, AgentStatus: "done"})
 		}(i, result)
 	}
 
 	debateWg.Wait()
 
 	synthesizerRole := roles[len(roles)-1]
-	cb(Event{Type: EventThinking, Content: fmt.Sprintf("[%s] starting...", synthesizerRole.Name), AgentID: synthesizerRole.Name, AgentStatus: "synthesizing"})
+	cb(Event{Type: EventThinking, Content: "starting...", AgentID: synthesizerRole.Name, AgentStatus: "synthesizing"})
 	var debateContent strings.Builder
 	for i, result := range validResults {
 		debateContent.WriteString(fmt.Sprintf("## [%s] (after debate)\n%s\n\n", result.Role, debateResults[i]))
