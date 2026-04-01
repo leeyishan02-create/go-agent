@@ -195,6 +195,8 @@ func MultiAgentQueryWithHistory(client *Client, toolList []Tool, history []Messa
 		return "", fmt.Errorf("synthesis error: %w", err)
 	}
 
+	cb(Event{Type: EventThinking, Content: "done", AgentID: synthesizerRole.Name, AgentStatus: "done"})
+
 	totalUsage.PromptTokens += synthUsage.PromptTokens
 	totalUsage.CompletionTokens += synthUsage.CompletionTokens
 	totalUsage.TotalTokens += synthUsage.TotalTokens
