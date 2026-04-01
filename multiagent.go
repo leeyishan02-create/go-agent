@@ -61,7 +61,7 @@ func MultiAgentQueryWithHistory(client *Client, toolList []Tool, history []Messa
 
 			toolDefs := buildToolDefs(toolList)
 
-			cb(Event{Type: EventThinking, Content: fmt.Sprintf("[%s] generating answer...", r.Name), AgentID: r.Name, AgentStatus: "thinking"})
+			cb(Event{Type: EventThinking, Content: fmt.Sprintf("[%s] starting...", r.Name), AgentID: r.Name, AgentStatus: "thinking"})
 
 			content, _, usage, err := client.ChatStream(messages, toolDefs, nil, nil)
 			if err != nil {

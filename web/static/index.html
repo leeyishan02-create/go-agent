@@ -56,8 +56,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--m
 .thinking-panel-header:hover{background:rgba(188,140,255,.1)}
 .thinking-panel-header .arrow{transition:transform .2s;font-size:10px}
 .thinking-panel-header .arrow.open{transform:rotate(90deg)}
-.thinking-panel-body{display:none;padding:8px 12px;font-size:12px;color:var(--purple);white-space:pre-wrap;border-top:1px solid rgba(188,140,255,.15);max-height:400px;overflow-y:auto;line-height:1.6}
-.thinking-panel-body.open{display:block}
+.thinking-panel-body{display:block;padding:8px 12px;font-size:12px;color:var(--purple);white-space:pre-wrap;border-top:1px solid rgba(188,140,255,.15);max-height:400px;overflow-y:auto;line-height:1.6}
 
 .agent-tag{display:inline-block;background:rgba(188,140,255,.15);border:1px solid rgba(188,140,255,.3);border-radius:4px;padding:1px 6px;font-size:10px;margin-right:4px}
 
@@ -585,7 +584,6 @@ function createAssistantMsg() {
 
   const thinkingPanel = document.createElement('div');
   thinkingPanel.className = 'thinking-panel';
-  if (!showThinking) thinkingPanel.style.display = 'none';
   thinkingPanel.innerHTML =
     '<div class="thinking-panel-header" onclick="this.nextElementSibling.classList.toggle(\'open\');this.querySelector(\'.arrow\').classList.toggle(\'open\')">' +
       '<span class="arrow">▶</span>' +
@@ -631,7 +629,6 @@ function ensureAgentStatusBar() {
 
 function updateAgentStatus(agentId, status, text) {
   if (!currentAssistantMsg) createAssistantMsg();
-  currentThinkingPanel.style.display = showThinking ? '' : 'none';
   ensureAgentStatusBar();
 
   const bar = currentThinkingBody.querySelector('.agent-status-bar');
@@ -653,6 +650,26 @@ function updateAgentStatus(agentId, status, text) {
     const textEl = item.querySelector('.agent-status-text');
     if (textEl) textEl.textContent = text;
   }
+
+  // Always show thinking panel when there are agent status updates
+  currentThinkingPanel.style.display = '';
+
+  agentStatusMap[agentId] = {status: status, text: text};
+  scrollToBottom();
+}
+
+  const item = bar.querySelector('[data-agent="' + agentId + '"]');
+  if (item) {
+    item.classList.remove('status-thinking', 'status-debating', 'status-done', 'status-error', 'status-synthesizing');
+    const statusClass = 'status-' + status;
+    item.classList.add(statusClass);
+    const textEl = item.querySelector('.agent-status-text');
+    if (textEl) textEl.textContent = text;
+  }
+
+  // Always show thinking panel when there are agent status updates
+  currentThinkingPanel.style.display = '';
+
   agentStatusMap[agentId] = {status: status, text: text};
   scrollToBottom();
 }
@@ -725,6 +742,10 @@ function appendError(text) {
   div.querySelector('.msg-body').textContent = text;
   chatEl.appendChild(div);
   scrollToBottom();
+}
+
+function removeThinkingCursor() {
+  document.querySelectorAll('.thinking-cursor').forEach(el => el.remove());
 }
 
 function finishTurn() {
@@ -826,6 +847,7 @@ function handleEvent(evt) {
     case 'thinking':
       if (evt.agent_id && evt.agent_status) {
         updateAgentStatus(evt.agent_id, evt.agent_status, evt.content);
+        appendThinking(evt.content + '\n');
       } else {
         appendThinking(evt.content);
       }
