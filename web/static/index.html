@@ -51,12 +51,41 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--m
 .msg-body.user-msg{color:var(--text)}
 .msg-body.assistant-msg{color:var(--text)}
 
-.thinking-panel{background:rgba(188,140,255,.06);border:1px solid rgba(188,140,255,.2);border-radius:8px;margin:6px 0;overflow:hidden}
+.thinking-panel{background:rgba(188,140,255,.06);border:1px solid rgba(188,140,255,.2);border-radius:8px;margin:6px 0;overflow:hidden;display:block}
 .thinking-panel-header{display:flex;align-items:center;gap:6px;padding:8px 12px;cursor:pointer;user-select:none;font-size:12px;color:var(--purple);transition:background .15s}
 .thinking-panel-header:hover{background:rgba(188,140,255,.1)}
 .thinking-panel-header .arrow{transition:transform .2s;font-size:10px}
 .thinking-panel-header .arrow.open{transform:rotate(90deg)}
-.thinking-panel-body{display:block;padding:8px 12px;font-size:12px;color:var(--purple);white-space:pre-wrap;border-top:1px solid rgba(188,140,255,.15);max-height:400px;overflow-y:auto;line-height:1.6}
+.thinking-panel-body{display:block;padding:8px 12px;font-size:12px;color:var(--purple);white-space:pre-wrap;border-top:1px solid rgba(188,140,255,.15);max-height:400px;overflow-y:auto;line-height:1.6;min-height:20px}
+.thinking-panel-body .thinking-log{white-space:pre-wrap;color:#e6edf3;font-size:12px;line-height:1.6}
+.thinking-panel-body .thinking-log h1,.thinking-panel-body .thinking-log h2,.thinking-panel-body .thinking-log h3{margin:10px 0 6px;color:#e6edf3}
+.thinking-panel-body .thinking-log h1{font-size:16px;border-bottom:1px solid var(--border);padding-bottom:4px}
+.thinking-panel-body .thinking-log h2{font-size:14px;border-bottom:1px solid var(--border);padding-bottom:4px}
+.thinking-panel-body .thinking-log h3{font-size:13px}
+.thinking-panel-body .thinking-log p{margin:6px 0}
+.thinking-panel-body .thinking-log ul,.thinking-panel-body .thinking-log ol{margin:6px 0;padding-left:24px}
+.thinking-panel-body .thinking-log code{background:var(--bg3);padding:2px 6px;border-radius:4px;font-size:11px;font-family:var(--mono)}
+.thinking-panel-body .thinking-log pre{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;margin:8px 0;overflow-x:auto}
+.thinking-panel-body .thinking-log pre code{background:none;padding:0}
+.thinking-panel-body .thinking-log blockquote{border-left:3px solid var(--border);padding:4px 12px;margin:8px 0;color:var(--text2)}
+.thinking-panel-body .thinking-log strong{color:#e6edf3;font-weight:bold}
+.thinking-panel-body .thinking-log a{color:var(--blue);text-decoration:none}
+.thinking-panel-body .thinking-log table{border-collapse:collapse;margin:8px 0}
+.thinking-panel-body .thinking-log th,.thinking-panel-body .thinking-log td{border:1px solid var(--border);padding:6px 10px;font-size:12px}
+.thinking-panel-body .thinking-log th{background:var(--bg3)}
+.thinking-panel-body .agent-draft{color:#e6edf3;font-size:13px;line-height:1.7;margin-top:8px;padding-top:8px;border-top:1px solid rgba(188,140,255,.2)}
+.thinking-panel-body .agent-draft h1,.thinking-panel-body .agent-draft h2,.thinking-panel-body .agent-draft h3{margin:10px 0 6px;color:#e6edf3}
+.thinking-panel-body .agent-draft h1{font-size:16px;border-bottom:1px solid var(--border);padding-bottom:4px}
+.thinking-panel-body .agent-draft h2{font-size:14px;border-bottom:1px solid var(--border);padding-bottom:4px}
+.thinking-panel-body .agent-draft h3{font-size:13px}
+.thinking-panel-body .agent-draft p{margin:6px 0}
+.thinking-panel-body .agent-draft ul,.thinking-panel-body .agent-draft ol{margin:6px 0;padding-left:24px}
+.thinking-panel-body .agent-draft code{background:var(--bg3);padding:2px 6px;border-radius:4px;font-size:11px;font-family:var(--mono)}
+.thinking-panel-body .agent-draft pre{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;margin:8px 0;overflow-x:auto}
+.thinking-panel-body .agent-draft pre code{background:none;padding:0}
+.thinking-panel-body .agent-draft blockquote{border-left:3px solid var(--border);padding:4px 12px;margin:8px 0;color:var(--text2)}
+.thinking-panel-body .agent-draft strong{color:#e6edf3;font-weight:bold}
+.thinking-panel-body .agent-draft a{color:var(--blue);text-decoration:none}
 
 .agent-tag{display:inline-block;background:rgba(188,140,255,.15);border:1px solid rgba(188,140,255,.3);border-radius:4px;padding:1px 6px;font-size:10px;margin-right:4px}
 
@@ -291,6 +320,7 @@ if (typeof marked !== 'undefined') {
 }
 
 const $ = id => document.getElementById(id);
+const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
 const chatEl = $('chat');
 const inputEl = $('input');
 const sendBtn = $('send-btn');
@@ -613,8 +643,24 @@ function createAssistantMsg() {
 
 function appendThinking(text) {
   if (!currentAssistantMsg) createAssistantMsg();
-  currentThinkingPanel.style.display = showThinking ? '' : 'none';
-  currentThinkingBody.textContent += text;
+  currentThinkingPanel.style.display = '';
+
+  let thinkEl = currentThinkingBody.querySelector('.thinking-log');
+  if (!thinkEl) {
+    thinkEl = document.createElement('div');
+    thinkEl.className = 'thinking-log';
+    thinkEl.dataset.raw = '';
+    currentThinkingBody.appendChild(thinkEl);
+  }
+  let raw = thinkEl.dataset.raw || '';
+  raw += text;
+  thinkEl.dataset.raw = raw;
+  if (typeof marked !== 'undefined') {
+    thinkEl.innerHTML = marked.parse(raw);
+  } else {
+    thinkEl.textContent = raw;
+  }
+  console.log('[thinking]', text.substring(0, 80));
   scrollToBottom();
 }
 
@@ -641,22 +687,6 @@ function updateAgentStatus(agentId, status, text) {
     item.innerHTML = '<span class="agent-name-label">' + esc(agentId) + '</span><span class="agent-status-text"></span>';
     bar.appendChild(item);
   }
-
-  const item = bar.querySelector('[data-agent="' + agentId + '"]');
-  if (item) {
-    item.classList.remove('status-thinking', 'status-debating', 'status-done', 'status-error', 'status-synthesizing');
-    const statusClass = 'status-' + status;
-    item.classList.add(statusClass);
-    const textEl = item.querySelector('.agent-status-text');
-    if (textEl) textEl.textContent = text;
-  }
-
-  // Always show thinking panel when there are agent status updates
-  currentThinkingPanel.style.display = '';
-
-  agentStatusMap[agentId] = {status: status, text: text};
-  scrollToBottom();
-}
 
   const item = bar.querySelector('[data-agent="' + agentId + '"]');
   if (item) {
@@ -847,7 +877,6 @@ function handleEvent(evt) {
     case 'thinking':
       if (evt.agent_id && evt.agent_status) {
         updateAgentStatus(evt.agent_id, evt.agent_status, evt.content);
-        appendThinking(evt.content + '\n');
       } else {
         appendThinking(evt.content);
       }

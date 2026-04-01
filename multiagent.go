@@ -125,7 +125,6 @@ func MultiAgentQueryWithHistory(client *Client, toolList []Tool, history []Messa
 	}
 
 	// Debate round
-	cb(Event{Type: EventThinking, Content: "Starting debate round...", AgentStatus: "debate_start"})
 
 	var debateWg sync.WaitGroup
 	debateResults := make([]string, len(validResults))
@@ -172,9 +171,8 @@ func MultiAgentQueryWithHistory(client *Client, toolList []Tool, history []Messa
 
 	debateWg.Wait()
 
-	cb(Event{Type: EventThinking, Content: "Synthesizing final answer...", AgentStatus: "synthesizing"})
-
 	synthesizerRole := roles[len(roles)-1]
+	cb(Event{Type: EventThinking, Content: fmt.Sprintf("[%s] starting...", synthesizerRole.Name), AgentID: synthesizerRole.Name, AgentStatus: "synthesizing"})
 	var debateContent strings.Builder
 	for i, result := range validResults {
 		debateContent.WriteString(fmt.Sprintf("## [%s] (after debate)\n%s\n\n", result.Role, debateResults[i]))
