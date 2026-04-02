@@ -1,13 +1,25 @@
 package tools
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
+
+var searchHTTPClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 5,
+		IdleConnTimeout:     30 * time.Second,
+	},
+}
 
 type SearchTool struct {
 	Provider string
@@ -43,41 +55,58 @@ func (t *SearchTool) InputSchema() map[string]interface{} {
 func (t *SearchTool) Execute(input json.RawMessage) (string, error) {
 	var args SearchInput
 	if err := json.Unmarshal(input, &args); err != nil {
-		return "Error: invalid input: " + err.Error(), nil
+		return "", fmt.Errorf("invalid input: %w", err)
+	}
+
+	if args.Query == "" {
+		return "", fmt.Errorf("query is required")
 	}
 
 	if t.APIKey == "" {
-		return "Error: search API key not configured. Please set it in Settings.", nil
+		return "", fmt.Errorf("search API key not configured")
 	}
 
 	switch t.Provider {
 	case "tavily":
-		return t.searchTavily(args.Query)
+		return t.searchTavily(context.Background(), args.Query)
 	case "searxng":
-		return t.searchSearxNG(args.Query)
+		return t.searchSearxNG(context.Background(), args.Query)
 	default:
-		return "Error: unknown search provider: " + t.Provider, nil
+		return "", fmt.Errorf("unknown search provider: %s", t.Provider)
 	}
 }
 
-func (t *SearchTool) searchTavily(query string) (string, error) {
+func (t *SearchTool) searchTavily(ctx context.Context, query string) (string, error) {
 	body := map[string]interface{}{
 		"api_key":      t.APIKey,
 		"query":        query,
 		"search_depth": "basic",
 		"max_results":  5,
 	}
-	bodyBytes, _ := json.Marshal(body)
-
-	resp, err := http.Post("https://api.tavily.com/search", "application/json", strings.NewReader(string(bodyBytes)))
+	bodyBytes, err := json.Marshal(body)
 	if err != nil {
-		return "Search error: " + err.Error(), nil
+		return "", fmt.Errorf("marshal tavily request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.tavily.com/search", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("create tavily request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := searchHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("tavily request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read tavily response: %w", err)
+	}
+
 	if resp.StatusCode != 200 {
-		return "Search API error: " + string(respBody), nil
+		return "", fmt.Errorf("tavily API error %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var result struct {
@@ -89,20 +118,21 @@ func (t *SearchTool) searchTavily(query string) (string, error) {
 		} `json:"results"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "Search parse error: " + err.Error(), nil
+		return "", fmt.Errorf("parse tavily response: %w", err)
+	}
+
+	if len(result.Results) == 0 {
+		return "No results found.", nil
 	}
 
 	var sb strings.Builder
 	for i, r := range result.Results {
 		sb.WriteString(fmt.Sprintf("[%d] %s\n    URL: %s\n    %s\n\n", i+1, r.Title, r.URL, r.Content))
 	}
-	if sb.Len() == 0 {
-		return "No results found.", nil
-	}
 	return sb.String(), nil
 }
 
-func (t *SearchTool) searchSearxNG(query string) (string, error) {
+func (t *SearchTool) searchSearxNG(ctx context.Context, query string) (string, error) {
 	baseURL := t.BaseURL
 	if baseURL == "" {
 		baseURL = "http://localhost:8080"
@@ -111,34 +141,44 @@ func (t *SearchTool) searchSearxNG(query string) (string, error) {
 	searchURL := fmt.Sprintf("%s/search?q=%s&format=json&categories=general",
 		baseURL, url.QueryEscape(query))
 
-	resp, err := http.Get(searchURL)
+	req, err := http.NewRequestWithContext(ctx, "GET", searchURL, nil)
 	if err != nil {
-		return "Search error: " + err.Error(), nil
+		return "", fmt.Errorf("create searxng request: %w", err)
+	}
+
+	resp, err := searchHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("searxng request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read searxng response: %w", err)
+	}
+
 	if resp.StatusCode != 200 {
-		return "Search API error: " + string(respBody), nil
+		return "", fmt.Errorf("searxng API error %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var result struct {
 		Results []struct {
-			Title    string `json:"title"`
-			URL      string `json:"url"`
-			Content  string `json:"content"`
+			Title   string `json:"title"`
+			URL     string `json:"url"`
+			Content string `json:"content"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "Search parse error: " + err.Error(), nil
+		return "", fmt.Errorf("parse searxng response: %w", err)
+	}
+
+	if len(result.Results) == 0 {
+		return "No results found.", nil
 	}
 
 	var sb strings.Builder
 	for i, r := range result.Results {
 		sb.WriteString(fmt.Sprintf("[%d] %s\n    URL: %s\n    %s\n\n", i+1, r.Title, r.URL, r.Content))
-	}
-	if sb.Len() == 0 {
-		return "No results found.", nil
 	}
 	return sb.String(), nil
 }

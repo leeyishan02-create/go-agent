@@ -2,10 +2,13 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 )
 
 func main() {
@@ -13,11 +16,18 @@ func main() {
 	port := flag.Int("port", 8080, "Web server port")
 	flag.Parse()
 
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 	if *webMode {
-		if err := StartWebServer(*port); err != nil {
-			fmt.Fprintf(os.Stderr, "Web server error: %v\n", err)
-			os.Exit(1)
-		}
+		fmt.Printf("Starting web server on port %d (Ctrl+C to stop)\n", *port)
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- StartWebServer(*port)
+		}()
+
+		<-ctx.Done()
+		fmt.Println("\nShutting down...")
 		return
 	}
 
@@ -35,7 +45,7 @@ func main() {
 			os.Exit(1)
 		}
 		prompt := strings.Join(args, " ")
-		if err := Query(client, toolList, prompt); err != nil {
+		if err := Query(ctx, client, toolList, prompt); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -56,7 +66,7 @@ func main() {
 			break
 		}
 
-		if err := Query(client, toolList, line); err != nil {
+		if err := Query(ctx, client, toolList, line); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		}
 		fmt.Println()

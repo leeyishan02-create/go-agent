@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -30,6 +31,16 @@ func MultiAgentQuery(client *Client, toolList []Tool, userMessage string, agentC
 }
 
 func MultiAgentQueryWithHistory(client *Client, toolList []Tool, history []Message, userMessage string, agentCount int, cb EventCallback) (string, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	return multiAgentQueryWithCtx(ctx, client, toolList, history, userMessage, agentCount, cb)
+}
+
+func MultiAgentQueryWithCtx(ctx context.Context, client *Client, toolList []Tool, history []Message, userMessage string, agentCount int, cb EventCallback) (string, error) {
+	return multiAgentQueryWithCtx(ctx, client, toolList, history, userMessage, agentCount, cb)
+}
+
+func multiAgentQueryWithCtx(ctx context.Context, client *Client, toolList []Tool, history []Message, userMessage string, agentCount int, cb EventCallback) (string, error) {
 	if agentCount < 1 {
 		agentCount = 1
 	}
@@ -44,39 +55,49 @@ func MultiAgentQueryWithHistory(client *Client, toolList []Tool, history []Messa
 		}
 	}
 
+	type agentWork struct {
+		idx  int
+		role AgentRole
+	}
+
 	var wg sync.WaitGroup
 	results := make([]AgentResult, len(roles))
 	var usageMu sync.Mutex
 	var totalUsage Usage
 
+	works := make([]agentWork, len(roles))
 	for i, role := range roles {
+		works[i] = agentWork{idx: i, role: role}
+	}
+
+	for _, w := range works {
 		wg.Add(1)
-		go func(idx int, r AgentRole) {
+		go func(work agentWork) {
 			defer wg.Done()
 
 			var messages []Message
-			messages = append(messages, Message{Role: "system", Content: r.Prefix + "\n\n" + buildSystemPrompt(toolList)})
+			messages = append(messages, Message{Role: "system", Content: work.role.Prefix + "\n\n" + buildSystemPrompt(toolList)})
 			messages = append(messages, history...)
 			messages = append(messages, Message{Role: "user", Content: userMessage})
 
 			toolDefs := buildToolDefs(toolList)
 
-			cb(Event{Type: EventThinking, Content: "starting...", AgentID: r.Name, AgentStatus: "thinking"})
+			cb(Event{Type: EventThinking, Content: "starting...", AgentID: work.role.Name, AgentStatus: "thinking"})
 
-			content, _, usage, err := client.ChatStream(messages, toolDefs, nil, nil)
+			content, _, usage, err := client.ChatStream(ctx, messages, toolDefs, nil, nil)
 			if err != nil {
-				cb(Event{Type: EventThinking, Content: "error: " + err.Error(), AgentID: r.Name, AgentStatus: "error"})
-				results[idx] = AgentResult{Role: r.Name, Error: err}
+				cb(Event{Type: EventThinking, Content: "error: " + err.Error(), AgentID: work.role.Name, AgentStatus: "error"})
+				results[work.idx] = AgentResult{Role: work.role.Name, Error: err}
 				return
 			}
 
 			if strings.TrimSpace(content) == "" {
-				cb(Event{Type: EventThinking, Content: "empty response", AgentID: r.Name, AgentStatus: "error"})
-				results[idx] = AgentResult{Role: r.Name, Error: fmt.Errorf("empty response")}
+				cb(Event{Type: EventThinking, Content: "empty response", AgentID: work.role.Name, AgentStatus: "error"})
+				results[work.idx] = AgentResult{Role: work.role.Name, Error: fmt.Errorf("empty response")}
 				return
 			}
 
-			cb(Event{Type: EventThinking, Content: "done", AgentID: r.Name, AgentStatus: "done"})
+			cb(Event{Type: EventThinking, Content: "done", AgentID: work.role.Name, AgentStatus: "done"})
 
 			usageMu.Lock()
 			totalUsage.PromptTokens += usage.PromptTokens
@@ -84,8 +105,8 @@ func MultiAgentQueryWithHistory(client *Client, toolList []Tool, history []Messa
 			totalUsage.TotalTokens += usage.TotalTokens
 			usageMu.Unlock()
 
-			results[idx] = AgentResult{Role: r.Name, Content: content}
-		}(i, role)
+			results[work.idx] = AgentResult{Role: work.role.Name, Content: content}
+		}(w)
 	}
 
 	wg.Wait()
@@ -125,7 +146,6 @@ func MultiAgentQueryWithHistory(client *Client, toolList []Tool, history []Messa
 	}
 
 	// Debate round
-
 	var debateWg sync.WaitGroup
 	debateResults := make([]string, len(validResults))
 
@@ -151,7 +171,7 @@ func MultiAgentQueryWithHistory(client *Client, toolList []Tool, history []Messa
 				{Role: "user", Content: critiquePrompt.String()},
 			}
 
-			content, _, usage, err := client.Chat(debateMessages, nil)
+			content, _, usage, err := client.Chat(ctx, debateMessages, nil)
 			if err != nil || strings.TrimSpace(content) == "" {
 				debateResults[idx] = r.Content
 				cb(Event{Type: EventThinking, Content: "debate done (fallback)", AgentID: r.Role, AgentStatus: "done"})
@@ -185,7 +205,7 @@ func MultiAgentQueryWithHistory(client *Client, toolList []Tool, history []Messa
 
 	toolDefs := buildToolDefs(toolList)
 
-	content, _, synthUsage, err := client.ChatStream(synthMessages, toolDefs, func(chunk string) {
+	content, _, synthUsage, err := client.ChatStream(ctx, synthMessages, toolDefs, func(chunk string) {
 		cb(Event{Type: EventAnswer, Content: chunk})
 	}, func(reasoning string) {
 		cb(Event{Type: EventThinking, Content: reasoning})

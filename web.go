@@ -318,10 +318,13 @@ func handleChatSSE(w http.ResponseWriter, r *http.Request, sessions *sync.Map, h
 		var assistantContent string
 		var err error
 
+		queryCtx, queryCancel := context.WithCancel(r.Context())
+		defer queryCancel()
+
 		if agentCount > 1 {
-			assistantContent, err = MultiAgentQueryWithHistory(client, toolList, historyMsgs, req.Content, agentCount, writeEvent)
+			assistantContent, err = MultiAgentQueryWithCtx(queryCtx, client, toolList, historyMsgs, req.Content, agentCount, writeEvent)
 		} else {
-			assistantContent, err = QueryWithCallbackAndHistory(client, toolList, historyMsgs, req.Content, writeEvent)
+			assistantContent, err = QueryWithCallbackAndCtx(queryCtx, client, toolList, historyMsgs, req.Content, writeEvent)
 		}
 
 		if err == nil && assistantContent != "" {
@@ -619,7 +622,7 @@ func handleTestConnection(w http.ResponseWriter, r *http.Request) {
 		Model:   req.Model,
 	}
 
-	_, _, _, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	_, _, _, err := client.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -755,34 +758,35 @@ func StartWebServer(port int) error {
 	sessions := &sync.Map{}
 	history := NewHistoryStore("data/history")
 
-	http.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
 		handleChatSSE(w, r, sessions, history)
 	})
-	http.HandleFunc("/api/reset", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/reset", func(w http.ResponseWriter, r *http.Request) {
 		handleResetSession(w, r, sessions)
 	})
-	http.HandleFunc("/api/history/archive", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/history/archive", func(w http.ResponseWriter, r *http.Request) {
 		handleArchiveSession(w, r, sessions, history)
 	})
-	http.HandleFunc("/api/history/list", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/history/list", func(w http.ResponseWriter, r *http.Request) {
 		handleListHistory(w, r, history)
 	})
-	http.HandleFunc("/api/history/get", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/history/get", func(w http.ResponseWriter, r *http.Request) {
 		handleGetHistory(w, r, history)
 	})
-	http.HandleFunc("/api/history/load", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/history/load", func(w http.ResponseWriter, r *http.Request) {
 		handleLoadHistory(w, r, sessions, history)
 	})
-	http.HandleFunc("/api/history/delete", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/history/delete", func(w http.ResponseWriter, r *http.Request) {
 		handleDeleteHistory(w, r, history)
 	})
-	http.HandleFunc("/api/history/search", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/history/search", func(w http.ResponseWriter, r *http.Request) {
 		handleSearchHistory(w, r, history)
 	})
-	http.HandleFunc("/api/test", handleTestConnection)
-	http.HandleFunc("/api/models", handleGetModels)
-	http.HandleFunc("/api/test-search", handleTestSearch)
-	http.HandleFunc("/api/providers", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/test", handleTestConnection)
+	mux.HandleFunc("/api/models", handleGetModels)
+	mux.HandleFunc("/api/test-search", handleTestSearch)
+	mux.HandleFunc("/api/providers", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -790,7 +794,7 @@ func StartWebServer(port int) error {
 			"search": searchProviders,
 		})
 	})
-	http.HandleFunc("/static/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/static/", func(w http.ResponseWriter, r *http.Request) {
 		filePath := "web" + r.URL.Path
 		data, err := staticFS.ReadFile(filePath)
 		if err != nil {
@@ -805,7 +809,7 @@ func StartWebServer(port int) error {
 		w.Header().Set("Cache-Control", "public, max-age=86400")
 		w.Write(data)
 	})
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		data, err := staticFS.ReadFile("web/static/index.html")
 		if err != nil {
 			http.Error(w, "not found", 404)
@@ -817,6 +821,14 @@ func StartWebServer(port int) error {
 	})
 
 	addr := fmt.Sprintf(":%d", port)
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 120 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
 	log.Printf("🌐 go-agent web UI running at http://localhost%s", addr)
-	return http.ListenAndServe(addr, nil)
+	return srv.ListenAndServe()
 }

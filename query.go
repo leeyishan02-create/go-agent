@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -92,8 +93,8 @@ func findTool(toolList []Tool, name string) Tool {
 	return nil
 }
 
-func Query(client *Client, toolList []Tool, userMessage string) error {
-	return QueryWithCallback(client, toolList, userMessage, func(event Event) {
+func Query(ctx context.Context, client *Client, toolList []Tool, userMessage string) error {
+	_, err := QueryWithCallbackAndCtx(ctx, client, toolList, nil, userMessage, func(event Event) {
 		switch event.Type {
 		case EventThinking:
 			fmt.Print(event.Content)
@@ -107,6 +108,7 @@ func Query(client *Client, toolList []Tool, userMessage string) error {
 			fmt.Fprintf(os.Stderr, "Error: %s\n", event.Content)
 		}
 	})
+	return err
 }
 
 func QueryWithCallback(client *Client, toolList []Tool, userMessage string, cb EventCallback) error {
@@ -115,6 +117,10 @@ func QueryWithCallback(client *Client, toolList []Tool, userMessage string, cb E
 }
 
 func QueryWithCallbackAndHistory(client *Client, toolList []Tool, history []Message, userMessage string, cb EventCallback) (string, error) {
+	return QueryWithCallbackAndCtx(context.Background(), client, toolList, history, userMessage, cb)
+}
+
+func QueryWithCallbackAndCtx(ctx context.Context, client *Client, toolList []Tool, history []Message, userMessage string, cb EventCallback) (string, error) {
 	systemPrompt := buildSystemPrompt(toolList)
 	var messages []Message
 	messages = append(messages, Message{Role: "system", Content: systemPrompt})
@@ -127,7 +133,14 @@ func QueryWithCallbackAndHistory(client *Client, toolList []Tool, history []Mess
 	var totalUsage Usage
 	var assistantContent string
 	for turn := 0; turn < maxTurns; turn++ {
-		content, toolCalls, usage, err := client.ChatStream(messages, toolDefs, func(chunk string) {
+		select {
+		case <-ctx.Done():
+			cb(Event{Type: EventError, Content: "query cancelled"})
+			return assistantContent, ctx.Err()
+		default:
+		}
+
+		content, toolCalls, usage, err := client.ChatStream(ctx, messages, toolDefs, func(chunk string) {
 			cb(Event{Type: EventAnswer, Content: chunk})
 		}, func(reasoning string) {
 			cb(Event{Type: EventThinking, Content: reasoning})

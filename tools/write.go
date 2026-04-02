@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,10 +57,13 @@ func (t *WriteTool) InputSchema() map[string]interface{} {
 func (t *WriteTool) Execute(input json.RawMessage) (string, error) {
 	var args map[string]interface{}
 	if err := json.Unmarshal(input, &args); err != nil {
-		return "Error: invalid input: " + err.Error(), nil
+		return "", fmt.Errorf("invalid input: %w", err)
 	}
 
 	path, _ := args["path"].(string)
+	if path == "" {
+		return "", fmt.Errorf("path is required")
+	}
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(cwd, path)
 	}
@@ -69,27 +73,27 @@ func (t *WriteTool) Execute(input json.RawMessage) (string, error) {
 		newStr, _ := args["new_string"].(string)
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return "Error reading file for edit: " + err.Error(), nil
+			return "", fmt.Errorf("read %s for edit: %w", path, err)
 		}
 		content := string(data)
 		if !strings.Contains(content, oldStr) {
-			return "Error: old_string not found in file", nil
+			return "", fmt.Errorf("old_string not found in %s", path)
 		}
 		content = strings.Replace(content, oldStr, newStr, 1)
 		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-			return "Error writing file: " + err.Error(), nil
+			return "", fmt.Errorf("write %s: %w", path, err)
 		}
-		return "Successfully edited " + path, nil
+		return fmt.Sprintf("Successfully edited %s", path), nil
 	}
 
 	// Full write mode
 	content, _ := args["content"].(string)
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "Error creating directory: " + err.Error(), nil
+		return "", fmt.Errorf("create directory %s: %w", dir, err)
 	}
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		return "Error writing file: " + err.Error(), nil
+		return "", fmt.Errorf("write %s: %w", path, err)
 	}
-	return "Successfully wrote " + path, nil
+	return fmt.Sprintf("Successfully wrote %s", path), nil
 }

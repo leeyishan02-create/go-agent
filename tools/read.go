@@ -37,7 +37,11 @@ func (t *ReadTool) InputSchema() map[string]interface{} {
 func (t *ReadTool) Execute(input json.RawMessage) (string, error) {
 	var args ReadInput
 	if err := json.Unmarshal(input, &args); err != nil {
-		return "Error: invalid input: " + err.Error(), nil
+		return "", fmt.Errorf("invalid input: %w", err)
+	}
+
+	if args.Path == "" {
+		return "", fmt.Errorf("path is required")
 	}
 
 	path := args.Path
@@ -45,9 +49,17 @@ func (t *ReadTool) Execute(input json.RawMessage) (string, error) {
 		path = filepath.Join(cwd, path)
 	}
 
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("access %s: %w", path, err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%s is a directory, not a file", path)
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "Error reading file: " + err.Error(), nil
+		return "", fmt.Errorf("read %s: %w", path, err)
 	}
 
 	content := string(data)
