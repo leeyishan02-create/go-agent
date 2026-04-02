@@ -2,14 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"go-agent/tools"
 )
@@ -50,6 +56,7 @@ var searchProviders = []SearchProvider{
 }
 
 type Session struct {
+	sessionID     string
 	client        *Client
 	tools         []Tool
 	searchTool    *tools.SearchTool
@@ -59,7 +66,105 @@ type Session struct {
 	mu            sync.Mutex
 }
 
-func handleChatSSE(w http.ResponseWriter, r *http.Request, sessions *sync.Map) {
+type ChatSession struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	Messages  []Message `json:"messages"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type HistoryStore struct {
+	dir string
+	mu  sync.RWMutex
+}
+
+func NewHistoryStore(dir string) *HistoryStore {
+	os.MkdirAll(dir, 0755)
+	return &HistoryStore{dir: dir}
+}
+
+func (hs *HistoryStore) Save(session ChatSession) error {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	data, err := json.MarshalIndent(session, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(hs.dir, session.ID+".json"), data, 0644)
+}
+
+func (hs *HistoryStore) List() ([]ChatSession, error) {
+	hs.mu.RLock()
+	defer hs.mu.RUnlock()
+	entries, err := os.ReadDir(hs.dir)
+	if err != nil {
+		return nil, err
+	}
+	var sessions []ChatSession
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(hs.dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var s ChatSession
+		if err := json.Unmarshal(data, &s); err != nil {
+			continue
+		}
+		sessions = append(sessions, s)
+	}
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt)
+	})
+	return sessions, nil
+}
+
+func (hs *HistoryStore) Load(id string) (*ChatSession, error) {
+	hs.mu.RLock()
+	defer hs.mu.RUnlock()
+	data, err := os.ReadFile(filepath.Join(hs.dir, id+".json"))
+	if err != nil {
+		return nil, err
+	}
+	var s ChatSession
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (hs *HistoryStore) Delete(id string) error {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	return os.Remove(filepath.Join(hs.dir, id+".json"))
+}
+
+func (hs *HistoryStore) Search(query string) ([]ChatSession, error) {
+	all, err := hs.List()
+	if err != nil {
+		return nil, err
+	}
+	query = strings.ToLower(query)
+	var results []ChatSession
+	for _, s := range all {
+		if strings.Contains(strings.ToLower(s.Title), query) {
+			results = append(results, s)
+			continue
+		}
+		for _, m := range s.Messages {
+			if strings.Contains(strings.ToLower(m.Content), query) {
+				results = append(results, s)
+				break
+			}
+		}
+	}
+	return results, nil
+}
+
+func handleChatSSE(w http.ResponseWriter, r *http.Request, sessions *sync.Map, history *HistoryStore) {
 	if r.Method != "POST" {
 		http.Error(w, "POST only", 405)
 		return
@@ -85,11 +190,12 @@ func handleChatSSE(w http.ResponseWriter, r *http.Request, sessions *sync.Map) {
 		return
 	}
 
-	sessionKey := r.RemoteAddr
+	sessionKey := strings.Split(r.RemoteAddr, ":")[0]
 	sessIface, _ := sessions.LoadOrStore(sessionKey, &Session{
-		client:   NewClient(),
-		tools:    GetTools(),
-		messages: []Message{},
+		sessionID: generateSessionID(),
+		client:    NewClient(),
+		tools:     GetTools(),
+		messages:  []Message{},
 	})
 	sess := sessIface.(*Session)
 
@@ -137,12 +243,12 @@ func handleChatSSE(w http.ResponseWriter, r *http.Request, sessions *sync.Map) {
 	client := sess.client
 	toolList := sess.tools
 	agentCount := sess.agentCount
-	history := make([]Message, len(sess.messages))
-	copy(history, sess.messages)
+	historyMsgs := make([]Message, len(sess.messages))
+	copy(historyMsgs, sess.messages)
 	sess.mu.Unlock()
 
 	log.Printf("[sse] starting query: model=%s search=%v agents=%d history=%d",
-		client.Model, sess.searchTool != nil, agentCount, len(history))
+		client.Model, sess.searchTool != nil, agentCount, len(historyMsgs))
 
 	eventCh := make(chan Event, 1024)
 	ctx, cancel := context.WithCancel(r.Context())
@@ -151,7 +257,6 @@ func handleChatSSE(w http.ResponseWriter, r *http.Request, sessions *sync.Map) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	// Single goroutine writes to HTTP response
 	go func() {
 		defer wg.Done()
 		defer cancel()
@@ -179,20 +284,58 @@ func handleChatSSE(w http.ResponseWriter, r *http.Request, sessions *sync.Map) {
 
 	go func() {
 		defer close(eventCh)
+
+		sess.mu.Lock()
+		sess.messages = append(sess.messages, Message{Role: "user", Content: req.Content})
+		messages := make([]Message, len(sess.messages))
+		copy(messages, sess.messages)
+		sessionID := sess.sessionID
+		sess.mu.Unlock()
+
+		title := "新对话"
+		for _, m := range messages {
+			if m.Role == "user" && m.Content != "" {
+				if len(m.Content) > 50 {
+					title = m.Content[:50] + "..."
+				} else {
+					title = m.Content
+				}
+				break
+			}
+		}
+		now := time.Now()
+		chatSession := ChatSession{
+			ID:        sessionID,
+			Title:     title,
+			Messages:  messages,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		if saveErr := history.Save(chatSession); saveErr != nil {
+			log.Printf("[history] failed to save session: %v", saveErr)
+		}
+
 		var assistantContent string
 		var err error
 
 		if agentCount > 1 {
-			assistantContent, err = MultiAgentQueryWithHistory(client, toolList, history, req.Content, agentCount, writeEvent)
+			assistantContent, err = MultiAgentQueryWithHistory(client, toolList, historyMsgs, req.Content, agentCount, writeEvent)
 		} else {
-			assistantContent, err = QueryWithCallbackAndHistory(client, toolList, history, req.Content, writeEvent)
+			assistantContent, err = QueryWithCallbackAndHistory(client, toolList, historyMsgs, req.Content, writeEvent)
 		}
 
 		if err == nil && assistantContent != "" {
 			sess.mu.Lock()
-			sess.messages = append(sess.messages, Message{Role: "user", Content: req.Content})
 			sess.messages = append(sess.messages, Message{Role: "assistant", Content: assistantContent})
+			messages = make([]Message, len(sess.messages))
+			copy(messages, sess.messages)
 			sess.mu.Unlock()
+
+			chatSession.Messages = messages
+			chatSession.UpdatedAt = time.Now()
+			if saveErr := history.Save(chatSession); saveErr != nil {
+				log.Printf("[history] failed to update session: %v", saveErr)
+			}
 		}
 	}()
 
@@ -210,17 +353,244 @@ func handleResetSession(w http.ResponseWriter, r *http.Request, sessions *sync.M
 		return
 	}
 
-	sessionKey := r.RemoteAddr
+	sessionKey := strings.Split(r.RemoteAddr, ":")[0]
 	sessIface, ok := sessions.Load(sessionKey)
 	if ok {
 		sess := sessIface.(*Session)
 		sess.mu.Lock()
 		sess.messages = []Message{}
+		sess.sessionID = generateSessionID()
 		sess.mu.Unlock()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+}
+
+func handleArchiveSession(w http.ResponseWriter, r *http.Request, sessions *sync.Map, history *HistoryStore) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(200)
+		return
+	}
+
+	sessionKey := strings.Split(r.RemoteAddr, ":")[0]
+	sessIface, ok := sessions.Load(sessionKey)
+	if !ok {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+		return
+	}
+
+	sess := sessIface.(*Session)
+	sess.mu.Lock()
+	messages := make([]Message, len(sess.messages))
+	copy(messages, sess.messages)
+	oldSessionID := sess.sessionID
+	sess.messages = []Message{}
+	sess.sessionID = generateSessionID()
+	sess.mu.Unlock()
+
+	if len(messages) > 0 {
+		title := "新对话"
+		for _, m := range messages {
+			if m.Role == "user" && m.Content != "" {
+				if len(m.Content) > 50 {
+					title = m.Content[:50] + "..."
+				} else {
+					title = m.Content
+				}
+				break
+			}
+		}
+		now := time.Now()
+		chatSession := ChatSession{
+			ID:        oldSessionID,
+			Title:     title,
+			Messages:  messages,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		if err := history.Save(chatSession); err != nil {
+			log.Printf("[history] failed to save session: %v", err)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+}
+
+func handleListHistory(w http.ResponseWriter, r *http.Request, history *HistoryStore) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(200)
+		return
+	}
+
+	sessions, err := history.List()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "message": err.Error()})
+		return
+	}
+
+	type SessionSummary struct {
+		ID        string    `json:"id"`
+		Title     string    `json:"title"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+	summaries := make([]SessionSummary, len(sessions))
+	for i, s := range sessions {
+		summaries[i] = SessionSummary{
+			ID:        s.ID,
+			Title:     s.Title,
+			CreatedAt: s.CreatedAt,
+			UpdatedAt: s.UpdatedAt,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "sessions": summaries})
+}
+
+func handleGetHistory(w http.ResponseWriter, r *http.Request, history *HistoryStore) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(200)
+		return
+	}
+
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "message": "id required"})
+		return
+	}
+
+	session, err := history.Load(id)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "message": "session not found"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "session": session})
+}
+
+func handleLoadHistory(w http.ResponseWriter, r *http.Request, sessions *sync.Map, history *HistoryStore) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(200)
+		return
+	}
+
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	session, err := history.Load(req.ID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "message": "session not found"})
+		return
+	}
+
+	sessionKey := strings.Split(r.RemoteAddr, ":")[0]
+	sessIface, _ := sessions.LoadOrStore(sessionKey, &Session{
+		sessionID: generateSessionID(),
+		client:    NewClient(),
+		tools:     GetTools(),
+		messages:  []Message{},
+	})
+	sess := sessIface.(*Session)
+	sess.mu.Lock()
+	sess.messages = session.Messages
+	sess.sessionID = session.ID
+	sess.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+}
+
+func handleDeleteHistory(w http.ResponseWriter, r *http.Request, history *HistoryStore) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(200)
+		return
+	}
+
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	if err := history.Delete(req.ID); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "message": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+}
+
+func handleSearchHistory(w http.ResponseWriter, r *http.Request, history *HistoryStore) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(200)
+		return
+	}
+
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "message": "query required"})
+		return
+	}
+
+	sessions, err := history.Search(query)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "message": err.Error()})
+		return
+	}
+
+	type SessionSummary struct {
+		ID        string    `json:"id"`
+		Title     string    `json:"title"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+	summaries := make([]SessionSummary, len(sessions))
+	for i, s := range sessions {
+		summaries[i] = SessionSummary{
+			ID:        s.ID,
+			Title:     s.Title,
+			CreatedAt: s.CreatedAt,
+			UpdatedAt: s.UpdatedAt,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "sessions": summaries})
 }
 
 func handleTestConnection(w http.ResponseWriter, r *http.Request) {
@@ -375,14 +745,39 @@ func min(a, b int) int {
 	return b
 }
 
+func generateSessionID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 func StartWebServer(port int) error {
 	sessions := &sync.Map{}
+	history := NewHistoryStore("data/history")
 
 	http.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
-		handleChatSSE(w, r, sessions)
+		handleChatSSE(w, r, sessions, history)
 	})
 	http.HandleFunc("/api/reset", func(w http.ResponseWriter, r *http.Request) {
 		handleResetSession(w, r, sessions)
+	})
+	http.HandleFunc("/api/history/archive", func(w http.ResponseWriter, r *http.Request) {
+		handleArchiveSession(w, r, sessions, history)
+	})
+	http.HandleFunc("/api/history/list", func(w http.ResponseWriter, r *http.Request) {
+		handleListHistory(w, r, history)
+	})
+	http.HandleFunc("/api/history/get", func(w http.ResponseWriter, r *http.Request) {
+		handleGetHistory(w, r, history)
+	})
+	http.HandleFunc("/api/history/load", func(w http.ResponseWriter, r *http.Request) {
+		handleLoadHistory(w, r, sessions, history)
+	})
+	http.HandleFunc("/api/history/delete", func(w http.ResponseWriter, r *http.Request) {
+		handleDeleteHistory(w, r, history)
+	})
+	http.HandleFunc("/api/history/search", func(w http.ResponseWriter, r *http.Request) {
+		handleSearchHistory(w, r, history)
 	})
 	http.HandleFunc("/api/test", handleTestConnection)
 	http.HandleFunc("/api/models", handleGetModels)
@@ -396,15 +791,12 @@ func StartWebServer(port int) error {
 		})
 	})
 	http.HandleFunc("/static/", func(w http.ResponseWriter, r *http.Request) {
-		// Serve static files from embedded filesystem
-		// Request path "/static/foo.js" maps to "web/static/foo.js" in embed
 		filePath := "web" + r.URL.Path
 		data, err := staticFS.ReadFile(filePath)
 		if err != nil {
 			http.Error(w, "not found", 404)
 			return
 		}
-		// Set content type based on extension
 		if strings.HasSuffix(r.URL.Path, ".js") {
 			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 		} else if strings.HasSuffix(r.URL.Path, ".css") {

@@ -1,0 +1,36 @@
+{
+  "id": "33a5f6eecadf2f787c2a1219870f7bd0",
+  "title": "你好，这是第一条消息",
+  "messages": [
+    {
+      "role": "user",
+      "content": "你好，这是第一条消息"
+    },
+    {
+      "role": "assistant",
+      "content": "您好！看到您是说第一条消息，但我目前没有看到任何消息内容。\n\n请问您有什么事情需要我帮忙吗？还是您想发一条消息给我？"
+    },
+    {
+      "role": "user",
+      "content": "这是第二条消息，继续对话"
+    },
+    {
+      "role": "assistant",
+      "content": "好的，那您接下来会提供第二条消息内容吗？"
+    },
+    {
+      "role": "user",
+      "content": "你好"
+    },
+    {
+      "role": "user",
+      "content": "你ihao"
+    },
+    {
+      "role": "assistant",
+      "content": "你好！很高兴继续和您对话。请问有什么我可以帮您的吗？"
+    }
+  ],
+  "created_at": "2026-04-02T11:41:15.067411952+08:00",
+  "updated_at": "2026-04-02T11:41:52.949995974+08:00"
+}
