@@ -75,30 +75,31 @@ var searchProviders = []SearchProvider{
 // Session 表示一个用户的会话状态，包含客户端配置、工具和消息历史。
 // 每个 IP 地址对应一个 Session，通过 sync.Map 管理。
 type Session struct {
-	sessionID     string       // 会话唯一标识
-	client        *Client      // LLM 客户端实例
-	tools         []Tool       // 当前可用工具列表
+	sessionID     string            // 会话唯一标识
+	client        *Client           // LLM 客户端实例
+	tools         []Tool            // 当前可用工具列表
 	searchTool    *tools.SearchTool // 搜索工具实例（可能为 nil）
-	showReasoning bool         // 是否显示模型推理过程
-	agentCount    int          // 多代理模式的代理数量
-	messages      []Message    // 当前会话的消息历史
-	mu            sync.Mutex   // 保护并发访问的互斥锁
+	showReasoning bool              // 是否显示模型推理过程
+	agentCount    int               // 多代理模式的代理数量
+	messages      []Message         // 当前会话的消息历史
+	mu            sync.Mutex        // 保护并发访问的互斥锁
 }
 
 // ChatSession 表示一个可持久化的聊天会话记录。
 // 以 JSON 文件形式存储在 data/history/ 目录中。
 type ChatSession struct {
-	ID        string    `json:"id"`         // 会话唯一标识
-	Title     string    `json:"title"`      // 会话标题（取自第一条用户消息）
-	Messages  []Message `json:"messages"`   // 完整的消息列表
-	CreatedAt time.Time `json:"created_at"` // 创建时间
-	UpdatedAt time.Time `json:"updated_at"` // 最后更新时间
+	ID             string    `json:"id"`              // 会话唯一标识
+	Title          string    `json:"title"`           // 会话标题（取自第一条用户消息）
+	Messages       []Message `json:"messages"`        // 完整的消息列表
+	PartialContent string    `json:"partial_content"` // 流式生成中的部分响应（导航中断时保存）
+	CreatedAt      time.Time `json:"created_at"`      // 创建时间
+	UpdatedAt      time.Time `json:"updated_at"`      // 最后更新时间
 }
 
 // HistoryStore 管理聊天历史记录的持久化存储。
 // 使用文件系统（JSON 文件）存储会话数据，支持并发读写。
 type HistoryStore struct {
-	dir string      // 存储目录路径
+	dir string       // 存储目录路径
 	mu  sync.RWMutex // 读写锁，允许多个并发读取但互斥写入
 }
 
@@ -365,11 +366,12 @@ func handleChatSSE(w http.ResponseWriter, r *http.Request, sessions *sync.Map, h
 		}
 		now := time.Now()
 		chatSession := ChatSession{
-			ID:        sessionID,
-			Title:     title,
-			Messages:  messages,
-			CreatedAt: now,
-			UpdatedAt: now,
+			ID:             sessionID,
+			Title:          title,
+			Messages:       messages,
+			PartialContent: "",
+			CreatedAt:      now,
+			UpdatedAt:      now,
 		}
 		if saveErr := history.Save(chatSession); saveErr != nil {
 			log.Printf("[history] failed to save session: %v", saveErr)
@@ -397,6 +399,7 @@ func handleChatSSE(w http.ResponseWriter, r *http.Request, sessions *sync.Map, h
 			sess.mu.Unlock()
 
 			chatSession.Messages = messages
+			chatSession.PartialContent = ""
 			chatSession.UpdatedAt = time.Now()
 			if saveErr := history.Save(chatSession); saveErr != nil {
 				log.Printf("[history] failed to update session: %v", saveErr)
@@ -406,6 +409,56 @@ func handleChatSSE(w http.ResponseWriter, r *http.Request, sessions *sync.Map, h
 
 	wg.Wait()
 	log.Printf("[sse] query completed: model=%s agents=%d", client.Model, agentCount)
+}
+
+// handleSavePartial 接收前端推送的部分响应内容并保存到历史。
+// 当用户在流式生成过程中导航离开时调用。
+// HTTP 方法：POST，请求体：{ session_id: 会话 ID, content: 部分响应内容 }
+func handleSavePartial(w http.ResponseWriter, r *http.Request, history *HistoryStore) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(200)
+		return
+	}
+
+	var req struct {
+		SessionID string `json:"session_id"`
+		Content   string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "message": err.Error()})
+		return
+	}
+
+	if req.SessionID == "" || req.Content == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "message": "session_id and content required"})
+		return
+	}
+
+	session, err := history.Load(req.SessionID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "message": "session not found"})
+		return
+	}
+
+	session.PartialContent = req.Content
+	session.UpdatedAt = time.Now()
+	if err := history.Save(*session); err != nil {
+		log.Printf("[partial] failed to save partial content: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "message": err.Error()})
+		return
+	}
+
+	log.Printf("[partial] saved %d chars for session %s", len(req.Content), req.SessionID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
 }
 
 // handleResetSession 重置当前客户端的会话（清空消息历史，生成新会话 ID）。
@@ -877,6 +930,9 @@ func StartWebServer(port int) error {
 	mux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
 		handleChatSSE(w, r, sessions, history)
 	})
+	mux.HandleFunc("/api/chat/save-partial", func(w http.ResponseWriter, r *http.Request) {
+		handleSavePartial(w, r, history)
+	})
 	mux.HandleFunc("/api/reset", func(w http.ResponseWriter, r *http.Request) {
 		handleResetSession(w, r, sessions)
 	})
@@ -946,9 +1002,9 @@ func StartWebServer(port int) error {
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      mux,
-		ReadTimeout:  15 * time.Second,   // 读取请求超时
-		WriteTimeout: 120 * time.Second,  // 写入响应超时（SSE 需要较长时间）
-		IdleTimeout:  120 * time.Second,  // 空闲连接超时
+		ReadTimeout:  15 * time.Second,  // 读取请求超时
+		WriteTimeout: 120 * time.Second, // 写入响应超时（SSE 需要较长时间）
+		IdleTimeout:  120 * time.Second, // 空闲连接超时
 	}
 
 	log.Printf("🌐 go-agent web UI running at http://localhost%s", addr)

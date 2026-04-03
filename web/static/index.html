@@ -689,8 +689,26 @@ function renderHistoryList(sessions) {
   });
 }
 
+async function savePartialResponse() {
+  if (!currentAnswerContent || !currentHistoryId) return;
+  const content = currentAnswerContent.dataset.raw || '';
+  if (!content) return;
+  try {
+    await fetch('/api/chat/save-partial', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ session_id: currentHistoryId, content: content })
+    });
+    console.log('[partial] saved', content.length, 'chars');
+  } catch(e) {
+    console.error('[partial] failed to save:', e);
+  }
+}
+
 async function loadHistorySession(id) {
   try {
+    await savePartialResponse();
+
     const loadR = await fetch('/api/history/load', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -707,20 +725,20 @@ async function loadHistorySession(id) {
     if (data.ok && data.session) {
       currentHistoryId = id;
       renderHistoryList(allHistorySessions);
-      displayHistoryMessages(data.session.messages);
+      displayHistoryMessages(data.session.messages, data.session.partial_content || '');
     }
   } catch(e) {
     console.error('Failed to load session:', e);
   }
 }
 
-function displayHistoryMessages(messages) {
+function displayHistoryMessages(messages, partialContent) {
   chatEl.innerHTML = '';
   sessionTokens = 0;
   sessionPromptTokens = 0;
   sessionCompletionTokens = 0;
   updateTokenDisplay();
-  if (messages.length === 0) {
+  if (messages.length === 0 && !partialContent) {
     chatEl.appendChild(welcomeEl);
     welcomeEl.style.display = '';
     return;
@@ -733,6 +751,9 @@ function displayHistoryMessages(messages) {
       renderStoredAssistantMsg(m.content);
     }
   });
+  if (partialContent) {
+    renderPartialMsg(partialContent);
+  }
   chatEl.scrollTop = chatEl.scrollHeight;
 }
 
@@ -740,6 +761,26 @@ function renderStoredAssistantMsg(content) {
   const div = document.createElement('div');
   div.className = 'msg';
   div.innerHTML = '<div class="msg-header"><span class="role assistant">🤖 Agent</span></div>';
+
+  const answerDiv = document.createElement('div');
+  answerDiv.className = 'answer-section';
+  const contentDiv = document.createElement('div');
+  contentDiv.className = 'answer-content';
+  contentDiv.dataset.raw = content;
+  if (typeof marked !== 'undefined') {
+    contentDiv.innerHTML = marked.parse(content);
+  } else {
+    contentDiv.textContent = content;
+  }
+  answerDiv.appendChild(contentDiv);
+  div.appendChild(answerDiv);
+  chatEl.appendChild(div);
+}
+
+function renderPartialMsg(content) {
+  const div = document.createElement('div');
+  div.className = 'msg';
+  div.innerHTML = '<div class="msg-header"><span class="role assistant">🤖 Agent</span> <span style="color:var(--orange);font-size:10px">(partial — interrupted)</span></div>';
 
   const answerDiv = document.createElement('div');
   answerDiv.className = 'answer-section';
@@ -1132,6 +1173,8 @@ async function startNewChat() {
     currentAbort = null;
   }
   busy = false;
+
+  await savePartialResponse();
 
   // Archive current session before clearing
   try {
