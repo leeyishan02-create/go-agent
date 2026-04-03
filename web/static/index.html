@@ -396,7 +396,9 @@ let searchMode = false;
 let sessionTokens = 0;
 let sessionPromptTokens = 0;
 let sessionCompletionTokens = 0;
-let currentHistoryId = null;
+let currentSessionId = null;    // 后端 session ID（从 SSE session 事件获取）
+let currentHistoryId = null;    // 当前加载的历史记录 ID
+let messages = [];               // 消息数据（单一数据源）
 let allHistorySessions = [];
 
 function updateTokenDisplay() {
@@ -690,16 +692,16 @@ function renderHistoryList(sessions) {
 }
 
 async function savePartialResponse() {
-  if (!currentAnswerContent || !currentHistoryId) return;
+  if (!currentSessionId || !currentAnswerContent) return;
   const content = currentAnswerContent.dataset.raw || '';
   if (!content) return;
   try {
     await fetch('/api/chat/save-partial', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ session_id: currentHistoryId, content: content })
+      body: JSON.stringify({ session_id: currentSessionId, content: content })
     });
-    console.log('[partial] saved', content.length, 'chars');
+    console.log('[partial] saved', content.length, 'chars for session', currentSessionId);
   } catch(e) {
     console.error('[partial] failed to save:', e);
   }
@@ -723,16 +725,18 @@ async function loadHistorySession(id) {
     const r = await fetch(`/api/history/get?id=${encodeURIComponent(id)}`);
     const data = await r.json();
     if (data.ok && data.session) {
+      currentSessionId = data.session.id;
       currentHistoryId = id;
+      messages = data.session.messages || [];
       renderHistoryList(allHistorySessions);
-      displayHistoryMessages(data.session.messages, data.session.partial_content || '');
+      renderAllMessages(data.session.partial_content || '');
     }
   } catch(e) {
     console.error('Failed to load session:', e);
   }
 }
 
-function displayHistoryMessages(messages, partialContent) {
+function renderAllMessages(partialContent) {
   chatEl.innerHTML = '';
   sessionTokens = 0;
   sessionPromptTokens = 0;
@@ -1123,6 +1127,9 @@ function sendMessage() {
 
 function handleEvent(evt) {
   switch (evt.type) {
+    case 'session':
+      currentSessionId = evt.session_id;
+      break;
     case 'thinking':
       if (evt.agent_id && evt.agent_status) {
         updateAgentStatus(evt.agent_id, evt.agent_status, evt.content);
@@ -1176,11 +1183,17 @@ async function startNewChat() {
 
   await savePartialResponse();
 
-  // Archive current session before clearing
+  // Archive current session and reset backend session
   try {
     await fetch('/api/history/archive', { method: 'POST' });
   } catch(e) {}
+  try {
+    await fetch('/api/reset', { method: 'POST' });
+  } catch(e) {}
 
+  currentSessionId = null;
+  currentHistoryId = null;
+  messages = [];
   sessionTokens = 0;
   sessionPromptTokens = 0;
   sessionCompletionTokens = 0;
@@ -1198,7 +1211,6 @@ async function startNewChat() {
   currentThinkingBody = null;
   removeThinkingCursor();
   setRunningState(false);
-  currentHistoryId = null;
   inputEl.focus();
   loadHistoryList(historySearchEl.value);
 }

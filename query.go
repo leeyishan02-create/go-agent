@@ -61,6 +61,7 @@ const (
 	EventToolResult EventType = "tool_result" // 工具执行结果
 	EventDone       EventType = "done"        // 查询完成
 	EventError      EventType = "error"       // 发生错误
+	EventSession    EventType = "session"     // 会话 ID（首个事件）
 )
 
 // Event 表示查询过程中产生的事件，通过 EventCallback 传递给调用者。
@@ -68,6 +69,7 @@ const (
 type Event struct {
 	Type        EventType       `json:"type"`                   // 事件类型
 	Content     string          `json:"content,omitempty"`      // 事件内容（思考/回答/错误文本）
+	SessionID   string          `json:"session_id,omitempty"`   // 会话 ID（EventSession）
 	Tool        string          `json:"tool,omitempty"`         // 工具名称
 	ID          string          `json:"id,omitempty"`           // 工具调用 ID
 	Input       json.RawMessage `json:"input,omitempty"`        // 工具输入参数（原始 JSON）
@@ -160,8 +162,8 @@ func QueryWithCallbackAndCtx(ctx context.Context, client *Client, toolList []Too
 
 	toolDefs := buildToolDefs(toolList)
 
-	maxTurns := 20         // 最大工具调用轮次
-	var totalUsage Usage   // 累计 token 使用量
+	maxTurns := 20              // 最大工具调用轮次
+	var totalUsage Usage        // 累计 token 使用量
 	var assistantContent string // 模型最新回复
 
 	// 工具调用循环

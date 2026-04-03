@@ -352,6 +352,9 @@ func handleChatSSE(w http.ResponseWriter, r *http.Request, sessions *sync.Map, h
 		sessionID := sess.sessionID
 		sess.mu.Unlock()
 
+		// 首个事件：返回 session_id 给前端
+		writeEvent(Event{Type: EventSession, SessionID: sessionID})
+
 		// 生成会话标题（取第一条用户消息的前 50 字符）
 		title := "新对话"
 		for _, m := range messages {
@@ -442,13 +445,20 @@ func handleSavePartial(w http.ResponseWriter, r *http.Request, history *HistoryS
 
 	session, err := history.Load(req.SessionID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "message": "session not found"})
-		return
+		now := time.Now()
+		session = &ChatSession{
+			ID:             req.SessionID,
+			Title:          "Partial session",
+			Messages:       []Message{},
+			PartialContent: req.Content,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		}
+	} else {
+		session.PartialContent = req.Content
+		session.UpdatedAt = time.Now()
 	}
 
-	session.PartialContent = req.Content
-	session.UpdatedAt = time.Now()
 	if err := history.Save(*session); err != nil {
 		log.Printf("[partial] failed to save partial content: %v", err)
 		w.Header().Set("Content-Type", "application/json")
